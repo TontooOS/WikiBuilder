@@ -6,7 +6,7 @@ contains a `wiki/MAIN.md` file, and packs everything into a Stored
 (0 compression) ZIP archive with a FishFile manifest.
 
 - Repository: https://github.com/TontooOS/WikiBuilder
-- License: TCL v26.1
+- License: TCL v27.0
 - Version: 27.0.0
 
 ## Feature Index
