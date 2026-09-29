@@ -6,7 +6,7 @@
     "status.fetch_repos": "Listing repositories of {org}...",
     "status.found_repos": "Found {count} repositories.",
     "status.fetch_wiki": "Fetching wiki of {repo} ({branch})...",
-    "status.repo_ok": "ok ({files} files).",
+    "status.repo_ok": "ok ({wiki} wiki files, {examples} example files).",
     "status.repo_skip": "skipped (no wiki/MAIN.md).",
     "status.repo_failed": "failed ({error}).",
     "status.write_manifest": "Writing manifest.fico...",

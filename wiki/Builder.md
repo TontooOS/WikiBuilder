@@ -1,15 +1,15 @@
 # Builder
 
 The list, fetch and pack pipeline. WikiBuilder runs three stages in order:
-list repositories, download wiki folders, write the bundle.
+list repositories, clone wiki and example folders, write the bundle.
 
 ## Stages
 
 | Stage | Function | Description |
 |---|---|---|
 | `list` | `list_repos` | Paginate `GET /orgs/{org}/repos?per_page=100&page=N` until a short page arrives |
-| `fetch` | `fetch_repo_wiki` | Download the `wiki/` folder of one repository, if it qualifies |
-| `pack` | `pack_bundle` | Write `manifest.fico` plus all wiki files as a Stored ZIP |
+| `fetch` | `clone_repo` + `load_repo_docs` | Shallow-clone one repo (`wiki/` + `examples/` blobs only), read both folders |
+| `pack` | `pack_bundle` | Write `manifest.fico` plus all files as a Stored ZIP |
 
 ## Listing
 
@@ -32,21 +32,25 @@ impl Github {
 ## Fetching
 
 ```rust
-impl Github {
-    fn fetch_repo_wiki(&self, org: &str, repo: &str, branch: &str)
-        -> Result<Option<RepoWiki>, String>
-}
+fn clone_repo(org: &str, repo: &str, branch: Option<&str>, dest: &Path)
+    -> Result<String, String>
+
+fn load_repo_docs(repo: &str, branch: &str, commit: &str, clone_dir: &Path)
+    -> Option<RepoWiki>
 ```
 
-- Lists `GET /repos/{org}/{repo}/contents/wiki?ref={branch}` and recurses
-  into subdirectories via `collect_contents`.
-- Returns `Ok(None)` when the repo has no `wiki/` folder (HTTP 404).
-- Returns `Ok(None)` when no downloaded path equals `wiki/MAIN.md`.
+- Clones with `git clone --depth 1 --filter=blob:none --sparse` (plus
+  `--branch` when overridden), then checks out only `wiki` and `examples`
+  via `git sparse-checkout set wiki examples`. Only the repo listing uses
+  the GitHub API (1-2 requests); all downloads go through git, so no API
+  quota is consumed.
+- Returns the cloned commit SHA (`git rev-parse HEAD`) for the manifest.
+- `load_repo_docs` collects `<Repo>/Wiki/...` from the `wiki/` folder and
+  `<Repo>/Examples/...` from the `examples/` folder (both matched
+  case-insensitively, missing `examples/` is fine).
+- Returns `Ok(None)` when the repo has no `wiki/MAIN.md`.
   Only repositories whose code contains `wiki/MAIN.md` are bundled.
-- Downloads every remaining file through its `download_url`.
-- Resolves the head commit SHA via `GET /repos/{org}/{repo}/branches/{branch}`;
-  unreachable SHAs become `"unknown"`.
-- Returns `Err` when a listing or file download fails with a non-2xx status.
+- Returns `Err` when cloning fails or the commit SHA is empty.
 - A per-repo `Err` never aborts the run: the repo is recorded in the
   manifest with status `failed` plus its error message, and the run
   continues. The run only fails when zero repos were bundled.
@@ -63,6 +67,7 @@ impl Github {
 - Bundle the repo when `wiki/MAIN.md` exists in its code.
 - Skip the repo otherwise; skipped names are recorded in the manifest with
   status `skipped_no_main`.
+- Repos with `wiki/MAIN.md` but no `examples/` folder bundle `Wiki/` only.
 
 ## Packing
 
@@ -72,8 +77,8 @@ fn pack_bundle(manifest: &FishDocument, repos: &[RepoWiki]) -> Result<Vec<u8>, S
 
 - Uses `ZipWriter` with `CompressionLevel::None`, so every entry is Stored
   (0 compression).
-- Writes `manifest.fico` first, then `<RepoName>/<relative wiki path>` files
-  sorted by repository and path.
+- Writes `manifest.fico` first, then `<RepoName>/Wiki/...` and
+  `<RepoName>/Examples/...` files sorted by repository and path.
 - Returns `Err` when an entry name is unsafe or packing fails.
 
 ## Usage / Example

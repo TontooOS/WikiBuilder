@@ -10,7 +10,8 @@ contains a `wiki/MAIN.md` file, and packs everything into a single Stored
 ```text
 DeveloperDocumentaion.zip
 ├── manifest.fico
-├── <RepoName>/... (wiki files of <RepoName>)
+├── <RepoName>/Wiki/... (wiki files of <RepoName>)
+├── <RepoName>/Examples/... (example files of <RepoName>)
 └── ...
 ```
 

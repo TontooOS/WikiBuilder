@@ -27,7 +27,7 @@ manual runs with an organisation or version override.
 > `Foundation`, `Foundation` needs no other TontooOS repo). When a framework
 > gains a new TontooOS path dependency, add it to the clone loop.
 | `Build wikibuilder` | `cargo build --release` with `WIKIBUILDER_VERSION` set |
-| `Build wiki bundle` | Runs the binary with `GITHUB_TOKEN` (5000 req/h quota), extracts `manifest.fico` for the release |
+| `Build wiki bundle` | Runs the binary with `GITHUB_TOKEN` (listing only; downloads use git), extracts `manifest.fico` for the release |
 | `Create release` | `gh release create` with the ZIP, the manifest and notes |
 
 ## Versions

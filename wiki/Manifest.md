@@ -33,6 +33,7 @@ fn build_manifest(org: &str, repos: &[RepoWiki], skipped: &[String]) -> FishDocu
 | `repo.<Key>.branch` | `string` | Scanned branch (explicit `--branch` or repo default) |
 | `repo.<Key>.commit` | `string` | Full head commit SHA, or `"unknown"` |
 | `repo.<Key>.wiki_files` | `integer` | Number of bundled wiki files (bundled repos only) |
+| `repo.<Key>.example_files` | `integer` | Number of bundled example files (bundled repos only) |
 | `repo.<Key>.status` | `string` | `"ok"`, `"skipped_no_main"` or `"failed"` |
 | `repo.<Key>.error` | `string` | Failure message (failed repos only) |
 
@@ -56,6 +57,7 @@ repo {
         branch: main
         commit: abcdef1234567890
         wiki_files: 9
+        example_files: 2
         status: ok
     }
     EmptyRepo {

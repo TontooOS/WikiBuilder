@@ -12,8 +12,9 @@ How to run WikiBuilder, switch languages and read the output bundle.
 | `--lang` | `en_us` | Status language (`en_us` or `de_de`) |
 | `--lang-dir` | auto | Directory with `<lang>.json` files |
 | `--list-only` | off | Only print repositories, build no bundle |
-| `--timeout` | `30` | HTTP timeout per request in seconds |
-| `--token` | `GITHUB_TOKEN` env | GitHub token for API requests (higher rate limits) |
+| `--timeout` | `30` | HTTP timeout per request in seconds (repo listing only) |
+| `--token` | `GITHUB_TOKEN` env | GitHub token for the repo listing (higher rate limits) |
+| `--workdir` | temp dir | Directory for the shallow repo clones (temp dir is removed after the run) |
 
 ## Languages
 
@@ -36,16 +37,21 @@ wikibuilder --lang en_us --lang-dir ./lang
 ```text
 DeveloperDocumentaion.zip
 ├── manifest.fico
-├── ArchiveKit/MAIN.md
-├── ArchiveKit/RULE.md
-├── ArchiveKit/Zip.md
-├── Foundation/MAIN.md
+├── ArchiveKit/Wiki/MAIN.md
+├── ArchiveKit/Wiki/RULE.md
+├── ArchiveKit/Wiki/Zip.md
+├── ArchiveKit/Examples/demo.rs
+├── Foundation/Wiki/MAIN.md
 └── ...
 ```
 
 - Every ZIP entry uses the Stored method (0 compression).
 - `manifest.fico` is always the first entry.
-- Wiki files live under `<RepoName>/` with their `wiki/` prefix stripped.
+- Wiki files live under `<RepoName>/Wiki/` with their `wiki/` prefix stripped.
+- Example files live under `<RepoName>/Examples/` with their `examples/`
+  prefix stripped (repos without an `examples/` folder bundle `Wiki/` only).
+- Downloads use `git clone` (shallow, `wiki` + `examples` blobs only), so
+  only the repo listing touches the GitHub API; `git` must be installed.
 - Repositories without `wiki/MAIN.md` in their code are absent from the
   archive but listed in the manifest with status `skipped_no_main`.
 

@@ -21,6 +21,7 @@ use clap::Parser;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Duration;
 
 use archivekit::{CompressionLevel, ZipWriter, ZipWriterOptions};
@@ -67,8 +68,12 @@ struct Args {
     /// HTTP timeout per request in seconds.
     #[arg(long, default_value_t = 30)]
     timeout: u64,
-    /// GitHub token for API requests (higher rate limits).
+    /// Directory for the shallow repo clones (default: temp dir, removed after the run).
+    #[arg(long)]
+    workdir: Option<PathBuf>,
+    /// GitHub token for the repo listing (higher rate limits).
     /// Falls back to the GITHUB_TOKEN environment variable.
+    /// Downloads use `git clone` and need no token.
     #[arg(long)]
     token: Option<String>,
 }
@@ -132,15 +137,6 @@ fn resolve_lang_dir(explicit: Option<PathBuf>) -> PathBuf {
 // ---------------------------------------------------------------------------
 // GitHub API (via NetworkKit, JSON via Foundation)
 // ---------------------------------------------------------------------------
-
-/// One entry of a `contents/` directory listing.
-#[derive(Debug, Clone)]
-struct ContentEntry {
-    name: String,
-    path: String,
-    is_dir: bool,
-    download_url: Option<String>,
-}
 
 /// A downloaded wiki file with its path inside the bundle.
 #[derive(Debug, Clone)]
@@ -235,93 +231,6 @@ impl Github {
         }
         Ok(repos)
     }
-
-    /// Recursively collect every file below `api_path`
-    /// (`repos/{org}/{repo}/contents/...`).
-    fn collect_contents(
-        &self,
-        api_path: &str,
-        branch: &str,
-        out: &mut Vec<(String, String)>,
-    ) -> Result<(), String> {
-        let url = format!("{GITHUB_API}/{api_path}?ref={branch}");
-        let (status, body) = self.get(&url)?;
-        if status == 404 {
-            return Err("NOT_FOUND".to_string());
-        }
-        if !(200..300).contains(&status) {
-            return Err(format!("contents request failed (HTTP {status})"));
-        }
-        let root = json_text(&body)?;
-        for entry in parse_content_entries(&root) {
-            if entry.is_dir {
-                self.collect_contents(&format!("{api_path}/{}", entry.name), branch, out)?;
-            } else if let Some(download) = entry.download_url {
-                out.push((entry.path, download));
-            }
-        }
-        Ok(())
-    }
-
-    /// Resolve the head commit SHA of `branch` (`unknown` when unreachable).
-    fn branch_head(&self, org: &str, repo: &str, branch: &str) -> String {
-        let url = format!("{GITHUB_API}/repos/{org}/{repo}/branches/{branch}");
-        let Ok((status, body)) = self.get(&url) else {
-            return "unknown".to_string();
-        };
-        if !(200..300).contains(&status) {
-            return "unknown".to_string();
-        }
-        let Ok(root) = json_text(&body) else {
-            return "unknown".to_string();
-        };
-        root.get("commit")
-            .and_then(|c| c.get("sha"))
-            .and_then(|s| s.as_str())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| "unknown".to_string())
-    }
-
-    /// Download the `wiki/` folder of one repo.
-    /// Returns `Ok(None)` when the repo has no wiki or no `wiki/MAIN.md`.
-    fn fetch_repo_wiki(
-        &self,
-        org: &str,
-        repo: &str,
-        branch: &str,
-    ) -> Result<Option<RepoWiki>, String> {
-        let base = format!("repos/{org}/{repo}/contents/wiki");
-        let mut raw: Vec<(String, String)> = Vec::new();
-        match self.collect_contents(&base, branch, &mut raw) {
-            Err(e) if e == "NOT_FOUND" => return Ok(None),
-            Err(e) => return Err(format!("{repo}: {e}")),
-            Ok(()) => {}
-        }
-        // Requirement: only repos whose code contains `wiki/MAIN.md` are bundled.
-        let has_main = raw.iter().any(|(path, _)| path == "wiki/MAIN.md");
-        if !has_main {
-            return Ok(None);
-        }
-        let mut files = Vec::with_capacity(raw.len());
-        for (path, download) in raw {
-            let (status, body) = self.get(&download)?;
-            if !(200..300).contains(&status) {
-                return Err(format!("{repo}: download of {path} failed (HTTP {status})"));
-            }
-            let rel = path.strip_prefix("wiki/").unwrap_or(&path);
-            files.push(WikiFile {
-                arc_path: format!("{repo}/{rel}"),
-                data: body,
-            });
-        }
-        files.sort_by(|a, b| a.arc_path.cmp(&b.arc_path));
-        Ok(Some(RepoWiki {
-            name: repo.to_string(),
-            branch: branch.to_string(),
-            commit: self.branch_head(org, repo, branch),
-            files,
-        }))
-    }
 }
 
 /// Seconds until the GitHub rate limit resets (`Retry-After` or
@@ -350,25 +259,141 @@ fn str_field(value: &JsonValue, field: &str) -> Option<String> {
     value.get(field).and_then(|v| v.as_str()).map(|s| s.to_string())
 }
 
-/// Parse one `contents/` listing response into entries.
-fn parse_content_entries(value: &JsonValue) -> Vec<ContentEntry> {
-    let mut out = Vec::new();
-    let items: &[JsonValue] = match value {
-        JsonValue::Array(items) => items,
-        _ => return out,
-    };
-    for item in items {
-        let Some(name) = str_field(item, "name") else { continue };
-        let Some(path) = str_field(item, "path") else { continue };
-        let kind = str_field(item, "type").unwrap_or_default();
-        out.push(ContentEntry {
-            name,
-            path,
-            is_dir: kind == "dir",
-            download_url: str_field(item, "download_url"),
-        });
+// ---------------------------------------------------------------------------
+// Wiki fetch via git clone (no API quota: only the repo listing uses HTTP)
+// ---------------------------------------------------------------------------
+
+/// Run `git` with `args`, returning stdout trimmed. `Err` carries git's
+/// stderr message, prefixed with the repo name when given.
+fn run_git(args: &[&str], repo: &str) -> Result<String, String> {
+    let out = Command::new("git")
+        .args(args)
+        .output()
+        .map_err(|e| format!("{repo}: cannot run git: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "{repo}: git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
     }
-    out
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Shallow-clone one repo (`HEAD` commit, `wiki/` blobs only) into `dest`.
+/// `branch` overrides the default branch when set. Returns the commit SHA.
+/// Uses the git protocol only, so no GitHub API quota is consumed.
+fn clone_repo(org: &str, repo: &str, branch: Option<&str>, dest: &Path) -> Result<String, String> {
+    let url = format!("https://github.com/{org}/{repo}.git");
+    let dest_str = dest.to_string_lossy().to_string();
+    if branch.is_some() {
+        run_git(
+            &[
+                "clone",
+                "--depth",
+                "1",
+                "--filter=blob:none",
+                "--sparse",
+                "--branch",
+                branch.unwrap_or_default(),
+                &url,
+                &dest_str,
+            ],
+            repo,
+        )?;
+    } else {
+        run_git(
+            &[
+                "clone",
+                "--depth",
+                "1",
+                "--filter=blob:none",
+                "--sparse",
+                &url,
+                &dest_str,
+            ],
+            repo,
+        )?;
+    }
+    // Fetch only the wiki and examples folder contents
+    // (empty checkout when both are missing).
+    run_git(
+        &["-C", &dest_str, "sparse-checkout", "set", "wiki", "examples"],
+        repo,
+    )?;
+    let sha = run_git(&["-C", &dest_str, "rev-parse", "HEAD"], repo)?;
+    if sha.is_empty() {
+        return Err(format!("{repo}: empty commit SHA after clone"));
+    }
+    Ok(sha)
+}
+
+/// Find a child directory of `parent`, preferring the exact `name` and
+/// falling back to a case-insensitive match (`wiki` vs `Wiki`).
+fn find_child_dir(parent: &Path, name: &str) -> Option<PathBuf> {
+    let exact = parent.join(name);
+    if exact.is_dir() {
+        return Some(exact);
+    }
+    fs::read_dir(parent)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| {
+            p.is_dir()
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.eq_ignore_ascii_case(name))
+                    .unwrap_or(false)
+        })
+}
+
+/// Collect every file below `dir` into `out` with `prefix` prepended.
+fn collect_dir_files(dir: &Path, prefix: &str, out: &mut Vec<WikiFile>) -> Option<()> {
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        for entry in fs::read_dir(&current).ok()? {
+            let path = entry.ok()?.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.is_file() {
+                let rel = path.strip_prefix(dir).ok()?;
+                out.push(WikiFile {
+                    arc_path: format!("{prefix}/{}", rel.to_string_lossy().replace('\\', "/")),
+                    data: fs::read(&path).ok()?,
+                });
+            }
+        }
+    }
+    Some(())
+}
+
+/// Read the checked-out `wiki/` and `examples/` folders into bundle files
+/// (`<Repo>/Wiki/...` and `<Repo>/Examples/...`).
+/// Returns `None` when `wiki/MAIN.md` is missing: only repositories whose
+/// code contains `wiki/MAIN.md` are bundled.
+fn load_repo_docs(
+    repo: &str,
+    branch: &str,
+    commit: &str,
+    clone_dir: &Path,
+) -> Option<RepoWiki> {
+    let wiki_dir = find_child_dir(clone_dir, "wiki")?;
+    if !wiki_dir.join("MAIN.md").is_file() {
+        return None;
+    }
+    let mut files = Vec::new();
+    collect_dir_files(&wiki_dir, &format!("{repo}/Wiki"), &mut files)?;
+    if let Some(examples_dir) = find_child_dir(clone_dir, "examples") {
+        collect_dir_files(&examples_dir, &format!("{repo}/Examples"), &mut files)?;
+    }
+    files.sort_by(|a, b| a.arc_path.cmp(&b.arc_path));
+    Some(RepoWiki {
+        name: repo.to_string(),
+        branch: branch.to_string(),
+        commit: commit.to_string(),
+        files,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -386,6 +411,17 @@ fn sanitize_fico_key(name: &str) -> String {
             }
         })
         .collect()
+}
+
+/// Split a repo's file count into `(wiki_files, example_files)`
+/// by bundle path prefix.
+fn split_counts(repo: &RepoWiki) -> (usize, usize) {
+    let examples = repo
+        .files
+        .iter()
+        .filter(|f| f.arc_path.starts_with(&format!("{}/Examples/", repo.name)))
+        .count();
+    (repo.files.len() - examples, examples)
 }
 
 /// Short version string: 7-char commit prefix, else the branch name.
@@ -419,11 +455,13 @@ fn build_manifest(
     doc.set("wiki.repos", FishValue::from(names));
     for repo in repos {
         let base = format!("repo.{}", sanitize_fico_key(&repo.name));
+        let (wiki_files, example_files) = split_counts(repo);
         doc.set(&format!("{base}.name"), repo.name.clone());
         doc.set(&format!("{base}.version"), repo_version(repo));
         doc.set(&format!("{base}.branch"), repo.branch.clone());
         doc.set(&format!("{base}.commit"), repo.commit.clone());
-        doc.set(&format!("{base}.wiki_files"), repo.files.len() as i64);
+        doc.set(&format!("{base}.wiki_files"), wiki_files as i64);
+        doc.set(&format!("{base}.example_files"), example_files as i64);
         doc.set(&format!("{base}.status"), "ok");
     }
     for name in skipped {
@@ -495,17 +533,40 @@ fn run(args: &Args, lang: &LangStore) -> Result<(), String> {
     let mut repos: Vec<RepoWiki> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
     let mut failed: Vec<(String, String)> = Vec::new();
+    // Shallow clones live here; the default temp dir is removed after the run.
+    let (workdir, keep_workdir) = match &args.workdir {
+        Some(dir) => (dir.clone(), true),
+        None => (
+            std::env::temp_dir().join(format!("wikibuilder-{}", std::process::id())),
+            false,
+        ),
+    };
+    fs::create_dir_all(&workdir)
+        .map_err(|e| format!("cannot create workdir '{}': {e}", workdir.display()))?;
     for (name, default_branch) in &listed {
         let branch = args.branch.as_ref().unwrap_or(default_branch);
         print!(
             "{}",
             lang.tf("status.fetch_wiki", &[("repo", name), ("branch", branch)])
         );
-        match github.fetch_repo_wiki(&args.org, name, branch) {
+        // Repo names are `[A-Za-z0-9._-]`: safe as directory names.
+        let dest = workdir.join(name);
+        let _ = fs::remove_dir_all(&dest);
+        let outcome = clone_repo(&args.org, name, args.branch.as_deref(), &dest).map(
+            |commit| load_repo_docs(name, branch, &commit, &dest),
+        );
+        match outcome {
             Ok(Some(wiki)) => {
+                let (wiki_files, example_files) = split_counts(&wiki);
                 println!(
                     " {}",
-                    lang.tf("status.repo_ok", &[("files", &wiki.files.len().to_string())])
+                    lang.tf(
+                        "status.repo_ok",
+                        &[
+                            ("wiki", &wiki_files.to_string()),
+                            ("examples", &example_files.to_string()),
+                        ]
+                    )
                 );
                 repos.push(wiki);
             }
@@ -522,6 +583,9 @@ fn run(args: &Args, lang: &LangStore) -> Result<(), String> {
     repos.sort_by(|a, b| a.name.cmp(&b.name));
     skipped.sort();
     failed.sort_by(|a, b| a.0.cmp(&b.0));
+    if !keep_workdir {
+        let _ = fs::remove_dir_all(&workdir);
+    }
 
     if repos.is_empty() {
         return Err(lang.t("error.empty"));
@@ -593,10 +657,16 @@ mod tests {
             name: "ArchiveKit".to_string(),
             branch: "main".to_string(),
             commit: "abcdef1234567890".to_string(),
-            files: vec![WikiFile {
-                arc_path: "ArchiveKit/MAIN.md".to_string(),
-                data: b"# wiki".to_vec(),
-            }],
+            files: vec![
+                WikiFile {
+                    arc_path: "ArchiveKit/Wiki/MAIN.md".to_string(),
+                    data: b"# wiki".to_vec(),
+                },
+                WikiFile {
+                    arc_path: "ArchiveKit/Examples/demo.rs".to_string(),
+                    data: b"fn main() {}".to_vec(),
+                },
+            ],
         }];
         let doc = build_manifest("TontooOS", &repos, &["EmptyRepo".to_string()], &[]);
         assert_eq!(doc.get("wiki.org").and_then(|v| v.as_str()), Some("TontooOS"));
@@ -607,6 +677,10 @@ mod tests {
         );
         assert_eq!(
             doc.get("repo.ArchiveKit.wiki_files").and_then(|v| v.as_i64()),
+            Some(1)
+        );
+        assert_eq!(
+            doc.get("repo.ArchiveKit.example_files").and_then(|v| v.as_i64()),
             Some(1)
         );
         assert_eq!(
@@ -625,7 +699,7 @@ mod tests {
             branch: "main".to_string(),
             commit: "abcdef1234567890".to_string(),
             files: vec![WikiFile {
-                arc_path: "ArchiveKit/MAIN.md".to_string(),
+                arc_path: "ArchiveKit/Wiki/MAIN.md".to_string(),
                 data: b"# wiki".to_vec(),
             }],
         }];
@@ -634,7 +708,7 @@ mod tests {
         let entries = archivekit::zip_unpack(&bytes).unwrap();
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
         assert!(names.contains(&"manifest.fico"));
-        assert!(names.contains(&"ArchiveKit/MAIN.md"));
+        assert!(names.contains(&"ArchiveKit/Wiki/MAIN.md"));
         // 0 compression: every file entry is Stored.
         for entry in &entries {
             if !entry.is_dir() {
@@ -694,6 +768,36 @@ mod tests {
             url: String::new(),
         };
         assert_eq!(retry_after_secs(&plain), None);
+    }
+
+    #[test]
+    fn load_repo_docs_reads_wiki_and_examples() {
+        let root = std::env::temp_dir().join(format!("wikibuilder-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let wiki = root.join("wiki");
+        fs::create_dir_all(wiki.join("sub")).unwrap();
+        fs::write(wiki.join("MAIN.md"), "# wiki").unwrap();
+        fs::write(wiki.join("sub").join("Page.md"), "page").unwrap();
+        let examples = root.join("examples");
+        fs::create_dir_all(&examples).unwrap();
+        fs::write(examples.join("demo.rs"), "fn main() {}").unwrap();
+        let loaded =
+            load_repo_docs("Demo", "main", "abc123", &root).expect("docs should load");
+        assert_eq!(loaded.name, "Demo");
+        assert_eq!(loaded.branch, "main");
+        assert_eq!(loaded.commit, "abc123");
+        let names: Vec<&str> = loaded.files.iter().map(|f| f.arc_path.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["Demo/Examples/demo.rs", "Demo/Wiki/MAIN.md", "Demo/Wiki/sub/Page.md"]
+        );
+        assert_eq!(split_counts(&loaded), (2, 1));
+        // Missing MAIN.md means skip.
+        fs::remove_file(wiki.join("MAIN.md")).unwrap();
+        assert!(load_repo_docs("Demo", "main", "abc123", &root).is_none());
+        // Missing folders mean skip.
+        assert!(load_repo_docs("Demo", "main", "abc123", &root.join("nowhere")).is_none());
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
