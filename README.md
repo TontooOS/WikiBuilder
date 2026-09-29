@@ -17,6 +17,12 @@ DeveloperDocumentaion.zip
 `manifest.fico` (FishFile syntax) records all repositories, their versions
 and the build date.
 
+## Automation
+
+A scheduled GitHub Actions workflow builds `DeveloperDocumentaion.zip` every
+3 days and publishes it as a versioned release (manual runs supported).
+See [wiki/Automation.md](wiki/Automation.md).
+
 ## Made for TontooOS
 
 Explore more at https://github.com/TontooOS/TontooOS

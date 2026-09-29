@@ -18,6 +18,7 @@ contains a `wiki/MAIN.md` file, and packs everything into a Stored
 | Builder | [Builder.md](Builder.md) | List, fetch and pack pipeline |
 | Manifest | [Manifest.md](Manifest.md) | `manifest.fico` format and fields |
 | Usage | [Usage.md](Usage.md) | CLI flags, languages and output layout |
+| Automation | [Automation.md](Automation.md) | Scheduled releases every 3 days plus manual runs |
 
 ## Quick Start
 
@@ -35,4 +36,5 @@ See [Builder.md](Builder.md) for details.
 
 ## Changelog
 
+- 2026-09-29: Added release automation (3-day schedule, manual trigger, versioned releases from 0.01)
 - 2026-09-29: Initial wiki for WikiBuilder 26.1.0

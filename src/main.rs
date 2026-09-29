@@ -32,7 +32,12 @@ use crate::Foundation::serialization::{JSONSerialization, JsonValue};
 use crate::NetworkKit::http::HttpRequest;
 
 /// Current builder version, also recorded in `manifest.fico`.
-pub const BUILDER_VERSION: &str = "26.1.0";
+/// Release builds override it with the `WIKIBUILDER_VERSION` env var
+/// (set by `.github/workflows/wiki-bundle.yml`); local builds use the default.
+pub const BUILDER_VERSION: &str = match option_env!("WIKIBUILDER_VERSION") {
+    Some(v) => v,
+    None => "26.1.0",
+};
 /// Default output file name in the current folder.
 pub const DEFAULT_OUT: &str = "DeveloperDocumentaion.zip";
 /// GitHub API base URL.

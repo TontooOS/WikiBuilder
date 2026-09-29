@@ -1,0 +1,92 @@
+name: Wiki Bundle Release
+
+# Builds DeveloperDocumentaion.zip every 3 days and publishes it as a
+# versioned release (0.01, 0.02, ... with rollover 0.99 -> 1.00).
+# Runs in TontooOS/WikiBuilder and reads the last version from this
+# repo's own releases, so no version file or version commit is needed.
+
+on:
+  schedule:
+    # Every 3 days at 03:00 UTC.
+    - cron: "0 3 */3 * *"
+  workflow_dispatch:
+    inputs:
+      org:
+        description: "GitHub organisation to scan"
+        required: false
+        default: "TontooOS"
+      version:
+        description: "Release version override like 0.07 (empty = auto from last release)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: wiki-bundle
+  cancel-in-progress: false
+
+jobs:
+  bundle:
+    name: Build wiki bundle and release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out WikiBuilder
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Resolve release version
+        id: version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION_OVERRIDE: ${{ inputs.version }}
+        run: python3 .github/workflows/next_version.py
+
+      - name: Provide TontooOS SDK
+        run: |
+          mkdir -p tontoolibs
+          for lib in Accessibility ArchiveKit AudioKit CoreData CoreIcon CoreImage CoreLocation CoreSettings CoreText CoreWindows DocumentKit FishFile Foundation LaunchPad MapsKit MediaKit NetworkKit PDFKit SDK SQLKit TontooUI WeatherKit WebKit; do
+            git clone --depth 1 "https://github.com/TontooOS/${lib}.git" "tontoolibs/${lib}"
+          done
+          sudo mkdir -p /Library/System
+          sudo ln -sfn "$PWD/tontoolibs/SDK" /Library/System/sdk
+
+      - name: Build wikibuilder
+        env:
+          WIKIBUILDER_VERSION: ${{ steps.version.outputs.version }}
+        run: cargo build --release
+
+      - name: Build wiki bundle
+        run: |
+          ORG="${{ inputs.org }}"
+          if [ -z "$ORG" ]; then ORG="TontooOS"; fi
+          ./target/release/wikibuilder --org "$ORG" --out DeveloperDocumentaion.zip | tee build.log
+          unzip -p DeveloperDocumentaion.zip manifest.fico > manifest.fico
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          ORG="${{ inputs.org }}"
+          if [ -z "$ORG" ]; then ORG="TontooOS"; fi
+          STATS="$(grep -oE 'Done: .*' build.log | tail -1)"
+          DATE="$(date -u +%Y-%m-%d)"
+          cat > NOTES.md <<EOF
+          ## Wiki Bundle $VERSION
+
+          Offline wiki bundle built $DATE UTC.
+
+          - Organisation: $ORG
+          - Stats: $STATS
+          - Archive: \`DeveloperDocumentaion.zip\` (Stored, 0 compression)
+          - Manifest: \`manifest.fico\` (repositories, versions, build date)
+          EOF
+          gh release create "v$VERSION" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Wiki Bundle $VERSION" \
+            --notes-file NOTES.md \
+            DeveloperDocumentaion.zip manifest.fico
