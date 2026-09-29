@@ -35,7 +35,7 @@ use networkkit::http::{HttpRequest, HttpResponse};
 /// (set by `.github/workflows/wiki-bundle.yml`); local builds use the default.
 pub const BUILDER_VERSION: &str = match option_env!("WIKIBUILDER_VERSION") {
     Some(v) => v,
-    None => "26.1.0",
+    None => "27.0.0",
 };
 /// Default output file name in the current folder.
 pub const DEFAULT_OUT: &str = "DeveloperDocumentaion.zip";

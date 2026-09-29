@@ -7,7 +7,7 @@ contains a `wiki/MAIN.md` file, and packs everything into a Stored
 
 - Repository: https://github.com/TontooOS/WikiBuilder
 - License: TCL v26.1
-- Version: 26.1.0
+- Version: 27.0.0
 
 ## Feature Index
 
@@ -40,4 +40,4 @@ See [Builder.md](Builder.md) for details.
 - 2026-09-29: Token auth, rate-limit retries and per-repo error tolerance (fixes CI 403)
 - 2026-09-29: Direct `/Library/System/*` dependencies instead of the SDK shim (fixes CI build)
 - 2026-09-29: Added release automation (3-day schedule, manual trigger, versioned releases from 0.01)
-- 2026-09-29: Initial wiki for WikiBuilder 26.1.0
+- 2026-09-29: Initial wiki for WikiBuilder 27.0.0

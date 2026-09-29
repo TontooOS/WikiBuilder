@@ -20,7 +20,7 @@ fn build_manifest(org: &str, repos: &[RepoWiki], skipped: &[String]) -> FishDocu
 
 | Field | Type | Description |
 |---|---|---|
-| `wiki.builder_version` | `string` | WikiBuilder version, e.g. `"26.1.0"` |
+| `wiki.builder_version` | `string` | WikiBuilder version, e.g. `"27.0.0"` |
 | `wiki.build_date` | `string` | Build date as UTC ISO-8601, e.g. `"2026-09-29T12:00:00.000Z"` |
 | `wiki.org` | `string` | Scanned GitHub organisation, e.g. `"TontooOS"` |
 | `wiki.repo_count` | `integer` | Number of bundled repositories |
@@ -41,7 +41,7 @@ fn build_manifest(org: &str, repos: &[RepoWiki], skipped: &[String]) -> FishDocu
 
 ```text
 wiki {
-    builder_version: "26.1.0"
+    builder_version: "27.0.0"
     build_date: "2026-09-29T12:00:00.000Z"
     org: TontooOS
     repo_count: 2
