@@ -8,9 +8,11 @@
     "status.fetch_wiki": "Fetching wiki of {repo} ({branch})...",
     "status.repo_ok": "ok ({files} files).",
     "status.repo_skip": "skipped (no wiki/MAIN.md).",
+    "status.repo_failed": "failed ({error}).",
     "status.write_manifest": "Writing manifest.fico...",
     "status.write_zip": "Packing bundle (Stored, 0 compression)...",
     "status.done": "Done: {repos} repos, {files} files -> {out} ({bytes} bytes).",
-    "error.prefix": "error"
+    "error.prefix": "error",
+    "error.empty": "no wiki data bundled, nothing to release"
   }
 }

@@ -25,6 +25,7 @@ fn build_manifest(org: &str, repos: &[RepoWiki], skipped: &[String]) -> FishDocu
 | `wiki.org` | `string` | Scanned GitHub organisation, e.g. `"TontooOS"` |
 | `wiki.repo_count` | `integer` | Number of bundled repositories |
 | `wiki.skipped_count` | `integer` | Number of skipped repositories |
+| `wiki.failed_count` | `integer` | Number of repos that errored mid-fetch |
 | `wiki.bundle` | `string` | Output file name, `"DeveloperDocumentaion.zip"` |
 | `wiki.repos` | `array` | Bundled repository names in sort order |
 | `repo.<Key>.name` | `string` | Original repository name |
@@ -32,7 +33,8 @@ fn build_manifest(org: &str, repos: &[RepoWiki], skipped: &[String]) -> FishDocu
 | `repo.<Key>.branch` | `string` | Scanned branch (explicit `--branch` or repo default) |
 | `repo.<Key>.commit` | `string` | Full head commit SHA, or `"unknown"` |
 | `repo.<Key>.wiki_files` | `integer` | Number of bundled wiki files (bundled repos only) |
-| `repo.<Key>.status` | `string` | `"ok"` for bundled repos, `"skipped_no_main"` for skipped ones |
+| `repo.<Key>.status` | `string` | `"ok"`, `"skipped_no_main"` or `"failed"` |
+| `repo.<Key>.error` | `string` | Failure message (failed repos only) |
 
 ## Usage / Example
 

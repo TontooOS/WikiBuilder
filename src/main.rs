@@ -27,7 +27,7 @@ use archivekit::{CompressionLevel, ZipWriter, ZipWriterOptions};
 use fishfile::{FishDocument, FishValue};
 use foundation::date::{Date, ISO8601DateFormatter};
 use foundation::serialization::{JSONSerialization, JsonValue};
-use networkkit::http::HttpRequest;
+use networkkit::http::{HttpRequest, HttpResponse};
 
 /// Current builder version, also recorded in `manifest.fico`.
 /// Release builds override it with the `WIKIBUILDER_VERSION` env var
@@ -67,6 +67,10 @@ struct Args {
     /// HTTP timeout per request in seconds.
     #[arg(long, default_value_t = 30)]
     timeout: u64,
+    /// GitHub token for API requests (higher rate limits).
+    /// Falls back to the GITHUB_TOKEN environment variable.
+    #[arg(long)]
+    token: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -155,14 +159,185 @@ struct RepoWiki {
     files: Vec<WikiFile>,
 }
 
-fn api_get(url: &str, timeout: Duration) -> Result<(u16, Vec<u8>), String> {
-    let resp = HttpRequest::get(url)
-        .header("User-Agent", USER_AGENT)
-        .header("Accept", "application/vnd.github+json")
-        .timeout(timeout)
-        .send()
-        .map_err(|e| format!("request failed for {url}: {e:?}"))?;
-    Ok((resp.status, resp.bytes().to_vec()))
+/// GitHub API client (via NetworkKit, JSON via Foundation).
+///
+/// Holds the timeout and the optional token. All listing, content and
+/// branch requests go through [`Github::get`], which authenticates when a
+/// token is set and retries transient failures (rate limits, 5xx).
+#[derive(Debug, Clone, Default)]
+struct Github {
+    timeout: Duration,
+    token: Option<String>,
+}
+
+impl Github {
+    /// Blocking GET returning `(status, body)`.
+    fn get(&self, url: &str) -> Result<(u16, Vec<u8>), String> {
+        let mut attempt = 0u32;
+        loop {
+            attempt += 1;
+            let mut req = HttpRequest::get(url)
+                .header("User-Agent", USER_AGENT)
+                .header("Accept", "application/vnd.github+json")
+                .timeout(self.timeout);
+            if let Some(token) = self.token.as_deref() {
+                req = req.header("Authorization", &format!("Bearer {token}"));
+            }
+            let resp = req
+                .send()
+                .map_err(|e| format!("request failed for {url}: {e:?}"))?;
+            if (resp.status == 403 || resp.status == 429)
+                && String::from_utf8_lossy(resp.bytes()).contains("rate limit")
+                && attempt <= 4
+            {
+                let wait = retry_after_secs(&resp).unwrap_or(60).min(600);
+                eprintln!("rate limited, waiting {wait}s (attempt {attempt})...");
+                std::thread::sleep(Duration::from_secs(wait));
+                continue;
+            }
+            if resp.status >= 500 && attempt <= 3 {
+                std::thread::sleep(Duration::from_secs(2 * u64::from(attempt)));
+                continue;
+            }
+            return Ok((resp.status, resp.bytes().to_vec()));
+        }
+    }
+
+    /// List all public repositories of `org` (follows `?page=` pagination).
+    fn list_repos(&self, org: &str) -> Result<Vec<(String, String)>, String> {
+        let mut repos = Vec::new();
+        let mut page = 1u32;
+        loop {
+            let url = format!("{GITHUB_API}/orgs/{org}/repos?per_page=100&page={page}");
+            let (status, body) = self.get(&url)?;
+            if status == 404 {
+                return Err(format!("organisation '{org}' not found (HTTP 404)"));
+            }
+            if !(200..300).contains(&status) {
+                return Err(format!("list repos failed (HTTP {status})"));
+            }
+            let root = json_text(&body)?;
+            let items = root.as_array().ok_or("expected JSON array for repos")?;
+            if items.is_empty() {
+                break;
+            }
+            for item in items {
+                if let Some(name) = str_field(item, "name") {
+                    let branch =
+                        str_field(item, "default_branch").unwrap_or_else(|| "main".to_string());
+                    repos.push((name, branch));
+                }
+            }
+            if items.len() < 100 {
+                break;
+            }
+            page += 1;
+        }
+        Ok(repos)
+    }
+
+    /// Recursively collect every file below `api_path`
+    /// (`repos/{org}/{repo}/contents/...`).
+    fn collect_contents(
+        &self,
+        api_path: &str,
+        branch: &str,
+        out: &mut Vec<(String, String)>,
+    ) -> Result<(), String> {
+        let url = format!("{GITHUB_API}/{api_path}?ref={branch}");
+        let (status, body) = self.get(&url)?;
+        if status == 404 {
+            return Err("NOT_FOUND".to_string());
+        }
+        if !(200..300).contains(&status) {
+            return Err(format!("contents request failed (HTTP {status})"));
+        }
+        let root = json_text(&body)?;
+        for entry in parse_content_entries(&root) {
+            if entry.is_dir {
+                self.collect_contents(&format!("{api_path}/{}", entry.name), branch, out)?;
+            } else if let Some(download) = entry.download_url {
+                out.push((entry.path, download));
+            }
+        }
+        Ok(())
+    }
+
+    /// Resolve the head commit SHA of `branch` (`unknown` when unreachable).
+    fn branch_head(&self, org: &str, repo: &str, branch: &str) -> String {
+        let url = format!("{GITHUB_API}/repos/{org}/{repo}/branches/{branch}");
+        let Ok((status, body)) = self.get(&url) else {
+            return "unknown".to_string();
+        };
+        if !(200..300).contains(&status) {
+            return "unknown".to_string();
+        }
+        let Ok(root) = json_text(&body) else {
+            return "unknown".to_string();
+        };
+        root.get("commit")
+            .and_then(|c| c.get("sha"))
+            .and_then(|s| s.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "unknown".to_string())
+    }
+
+    /// Download the `wiki/` folder of one repo.
+    /// Returns `Ok(None)` when the repo has no wiki or no `wiki/MAIN.md`.
+    fn fetch_repo_wiki(
+        &self,
+        org: &str,
+        repo: &str,
+        branch: &str,
+    ) -> Result<Option<RepoWiki>, String> {
+        let base = format!("repos/{org}/{repo}/contents/wiki");
+        let mut raw: Vec<(String, String)> = Vec::new();
+        match self.collect_contents(&base, branch, &mut raw) {
+            Err(e) if e == "NOT_FOUND" => return Ok(None),
+            Err(e) => return Err(format!("{repo}: {e}")),
+            Ok(()) => {}
+        }
+        // Requirement: only repos whose code contains `wiki/MAIN.md` are bundled.
+        let has_main = raw.iter().any(|(path, _)| path == "wiki/MAIN.md");
+        if !has_main {
+            return Ok(None);
+        }
+        let mut files = Vec::with_capacity(raw.len());
+        for (path, download) in raw {
+            let (status, body) = self.get(&download)?;
+            if !(200..300).contains(&status) {
+                return Err(format!("{repo}: download of {path} failed (HTTP {status})"));
+            }
+            let rel = path.strip_prefix("wiki/").unwrap_or(&path);
+            files.push(WikiFile {
+                arc_path: format!("{repo}/{rel}"),
+                data: body,
+            });
+        }
+        files.sort_by(|a, b| a.arc_path.cmp(&b.arc_path));
+        Ok(Some(RepoWiki {
+            name: repo.to_string(),
+            branch: branch.to_string(),
+            commit: self.branch_head(org, repo, branch),
+            files,
+        }))
+    }
+}
+
+/// Seconds until the GitHub rate limit resets (`Retry-After` or
+/// `X-RateLimit-Reset`), if the response carries either header.
+fn retry_after_secs(resp: &HttpResponse) -> Option<u64> {
+    if let Some(value) = resp.header("retry-after") {
+        if let Ok(secs) = value.trim().parse::<u64>() {
+            return Some(secs.saturating_add(5));
+        }
+    }
+    if let Some(value) = resp.header("x-ratelimit-reset") {
+        if let Ok(reset) = value.trim().parse::<i64>() {
+            return Some((reset - Date::now().timestamp() + 5).max(5) as u64);
+        }
+    }
+    None
 }
 
 fn json_text(bytes: &[u8]) -> Result<JsonValue, String> {
@@ -173,38 +348,6 @@ fn json_text(bytes: &[u8]) -> Result<JsonValue, String> {
 
 fn str_field(value: &JsonValue, field: &str) -> Option<String> {
     value.get(field).and_then(|v| v.as_str()).map(|s| s.to_string())
-}
-
-/// List all public repositories of `org` (follows `?page=` pagination).
-fn list_repos(org: &str, timeout: Duration) -> Result<Vec<(String, String)>, String> {
-    let mut repos = Vec::new();
-    let mut page = 1u32;
-    loop {
-        let url = format!("{GITHUB_API}/orgs/{org}/repos?per_page=100&page={page}");
-        let (status, body) = api_get(&url, timeout)?;
-        if status == 404 {
-            return Err(format!("organisation '{org}' not found (HTTP 404)"));
-        }
-        if !(200..300).contains(&status) {
-            return Err(format!("list repos failed (HTTP {status})"));
-        }
-        let root = json_text(&body)?;
-        let items = root.as_array().ok_or("expected JSON array for repos")?;
-        if items.is_empty() {
-            break;
-        }
-        for item in items {
-            if let Some(name) = str_field(item, "name") {
-                let branch = str_field(item, "default_branch").unwrap_or_else(|| "main".to_string());
-                repos.push((name, branch));
-            }
-        }
-        if items.len() < 100 {
-            break;
-        }
-        page += 1;
-    }
-    Ok(repos)
 }
 
 /// Parse one `contents/` listing response into entries.
@@ -226,97 +369,6 @@ fn parse_content_entries(value: &JsonValue) -> Vec<ContentEntry> {
         });
     }
     out
-}
-
-/// Recursively collect every file below `api_path` (`repos/{org}/{repo}/contents/...`).
-fn collect_contents(
-    api_path: &str,
-    branch: &str,
-    timeout: Duration,
-    out: &mut Vec<(String, String)>,
-) -> Result<(), String> {
-    let url = format!("{GITHUB_API}/{api_path}?ref={branch}");
-    let (status, body) = api_get(&url, timeout)?;
-    if status == 404 {
-        return Err("NOT_FOUND".to_string());
-    }
-    if !(200..300).contains(&status) {
-        return Err(format!("contents request failed (HTTP {status})"));
-    }
-    let root = json_text(&body)?;
-    for entry in parse_content_entries(&root) {
-        if entry.is_dir {
-            collect_contents(
-                &format!("{api_path}/{}", entry.name),
-                branch,
-                timeout,
-                out,
-            )?;
-        } else if let Some(download) = entry.download_url {
-            out.push((entry.path, download));
-        }
-    }
-    Ok(())
-}
-
-/// Resolve the head commit SHA of `branch` (`unknown` when unreachable).
-fn branch_head(org: &str, repo: &str, branch: &str, timeout: Duration) -> String {
-    let url = format!("{GITHUB_API}/repos/{org}/{repo}/branches/{branch}");
-    let Ok((status, body)) = api_get(&url, timeout) else {
-        return "unknown".to_string();
-    };
-    if !(200..300).contains(&status) {
-        return "unknown".to_string();
-    }
-    let Ok(root) = json_text(&body) else {
-        return "unknown".to_string();
-    };
-    root.get("commit")
-        .and_then(|c| c.get("sha"))
-        .and_then(|s| s.as_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "unknown".to_string())
-}
-
-/// Download the `wiki/` folder of one repo.
-/// Returns `Ok(None)` when the repo has no wiki or no `wiki/MAIN.md`.
-fn fetch_repo_wiki(
-    org: &str,
-    repo: &str,
-    branch: &str,
-    timeout: Duration,
-) -> Result<Option<RepoWiki>, String> {
-    let base = format!("repos/{org}/{repo}/contents/wiki");
-    let mut raw: Vec<(String, String)> = Vec::new();
-    match collect_contents(&base, branch, timeout, &mut raw) {
-        Err(e) if e == "NOT_FOUND" => return Ok(None),
-        Err(e) => return Err(format!("{repo}: {e}")),
-        Ok(()) => {}
-    }
-    // Requirement: only repos whose code contains `wiki/MAIN.md` are bundled.
-    let has_main = raw.iter().any(|(path, _)| path == "wiki/MAIN.md");
-    if !has_main {
-        return Ok(None);
-    }
-    let mut files = Vec::with_capacity(raw.len());
-    for (path, download) in raw {
-        let (status, body) = api_get(&download, timeout)?;
-        if !(200..300).contains(&status) {
-            return Err(format!("{repo}: download of {path} failed (HTTP {status})"));
-        }
-        let rel = path.strip_prefix("wiki/").unwrap_or(&path);
-        files.push(WikiFile {
-            arc_path: format!("{repo}/{rel}"),
-            data: body,
-        });
-    }
-    files.sort_by(|a, b| a.arc_path.cmp(&b.arc_path));
-    Ok(Some(RepoWiki {
-        name: repo.to_string(),
-        branch: branch.to_string(),
-        commit: branch_head(org, repo, branch, timeout),
-        files,
-    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -346,13 +398,22 @@ fn repo_version(repo: &RepoWiki) -> String {
 }
 
 /// Build the `manifest.fico` document: all repos, versions and build date.
-fn build_manifest(org: &str, repos: &[RepoWiki], skipped: &[String]) -> FishDocument {
+/// `failed` holds `(name, error)` pairs for repos that errored mid-fetch;
+/// they are recorded with status `failed` so one bad repo never aborts
+/// the whole bundle.
+fn build_manifest(
+    org: &str,
+    repos: &[RepoWiki],
+    skipped: &[String],
+    failed: &[(String, String)],
+) -> FishDocument {
     let mut doc = FishDocument::new();
     doc.set("wiki.builder_version", BUILDER_VERSION);
     doc.set("wiki.build_date", ISO8601DateFormatter::string_from(&Date::now()));
     doc.set("wiki.org", org);
     doc.set("wiki.repo_count", repos.len() as i64);
     doc.set("wiki.skipped_count", skipped.len() as i64);
+    doc.set("wiki.failed_count", failed.len() as i64);
     doc.set("wiki.bundle", DEFAULT_OUT);
     let names: Vec<FishValue> = repos.iter().map(|r| FishValue::from(r.name.clone())).collect();
     doc.set("wiki.repos", FishValue::from(names));
@@ -370,6 +431,13 @@ fn build_manifest(org: &str, repos: &[RepoWiki], skipped: &[String]) -> FishDocu
         doc.set(&format!("{base}.name"), name.clone());
         doc.set(&format!("{base}.version"), "none");
         doc.set(&format!("{base}.status"), "skipped_no_main");
+    }
+    for (name, err) in failed {
+        let base = format!("repo.{}", sanitize_fico_key(name));
+        doc.set(&format!("{base}.name"), name.clone());
+        doc.set(&format!("{base}.version"), "none");
+        doc.set(&format!("{base}.status"), "failed");
+        doc.set(&format!("{base}.error"), err.clone());
     }
     doc
 }
@@ -402,9 +470,17 @@ fn pack_bundle(manifest: &FishDocument, repos: &[RepoWiki]) -> Result<Vec<u8>, S
 // ---------------------------------------------------------------------------
 
 fn run(args: &Args, lang: &LangStore) -> Result<(), String> {
-    let timeout = Duration::from_secs(args.timeout);
+    let token = args.token.clone().or_else(|| {
+        std::env::var("GITHUB_TOKEN")
+            .ok()
+            .filter(|t| !t.trim().is_empty())
+    });
+    let github = Github {
+        timeout: Duration::from_secs(args.timeout),
+        token,
+    };
     println!("{}", lang.tf("status.fetch_repos", &[("org", &args.org)]));
-    let listed = list_repos(&args.org, timeout)?;
+    let listed = github.list_repos(&args.org)?;
     println!(
         "{}",
         lang.tf("status.found_repos", &[("count", &listed.len().to_string())])
@@ -418,31 +494,41 @@ fn run(args: &Args, lang: &LangStore) -> Result<(), String> {
 
     let mut repos: Vec<RepoWiki> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
+    let mut failed: Vec<(String, String)> = Vec::new();
     for (name, default_branch) in &listed {
         let branch = args.branch.as_ref().unwrap_or(default_branch);
         print!(
             "{}",
             lang.tf("status.fetch_wiki", &[("repo", name), ("branch", branch)])
         );
-        match fetch_repo_wiki(&args.org, name, branch, timeout)? {
-            Some(wiki) => {
+        match github.fetch_repo_wiki(&args.org, name, branch) {
+            Ok(Some(wiki)) => {
                 println!(
                     " {}",
                     lang.tf("status.repo_ok", &[("files", &wiki.files.len().to_string())])
                 );
                 repos.push(wiki);
             }
-            None => {
+            Ok(None) => {
                 println!(" {}", lang.t("status.repo_skip"));
                 skipped.push(name.clone());
+            }
+            Err(err) => {
+                println!(" {}", lang.tf("status.repo_failed", &[("error", &err)]));
+                failed.push((name.clone(), err));
             }
         }
     }
     repos.sort_by(|a, b| a.name.cmp(&b.name));
     skipped.sort();
+    failed.sort_by(|a, b| a.0.cmp(&b.0));
+
+    if repos.is_empty() {
+        return Err(lang.t("error.empty"));
+    }
 
     println!("{}", lang.t("status.write_manifest"));
-    let manifest = build_manifest(&args.org, &repos, &skipped);
+    let manifest = build_manifest(&args.org, &repos, &skipped, &failed);
     println!("{}", lang.t("status.write_zip"));
     let bytes = pack_bundle(&manifest, &repos)?;
     if let Some(parent) = args.out.parent() {
@@ -512,7 +598,7 @@ mod tests {
                 data: b"# wiki".to_vec(),
             }],
         }];
-        let doc = build_manifest("TontooOS", &repos, &["EmptyRepo".to_string()]);
+        let doc = build_manifest("TontooOS", &repos, &["EmptyRepo".to_string()], &[]);
         assert_eq!(doc.get("wiki.org").and_then(|v| v.as_str()), Some("TontooOS"));
         assert_eq!(doc.get("wiki.repo_count").and_then(|v| v.as_i64()), Some(1));
         assert_eq!(
@@ -543,7 +629,7 @@ mod tests {
                 data: b"# wiki".to_vec(),
             }],
         }];
-        let manifest = build_manifest("TontooOS", &repos, &[]);
+        let manifest = build_manifest("TontooOS", &repos, &[], &[]);
         let bytes = pack_bundle(&manifest, &repos).unwrap();
         let entries = archivekit::zip_unpack(&bytes).unwrap();
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
@@ -564,6 +650,50 @@ mod tests {
             reparsed.get("wiki.org").and_then(|v| v.as_str()),
             Some("TontooOS")
         );
+    }
+
+    #[test]
+    fn manifest_records_failed_repos() {
+        let failed = vec![("Dock".to_string(), "Dock: contents request failed (HTTP 403)".to_string())];
+        let doc = build_manifest("TontooOS", &[], &[], &failed);
+        assert_eq!(doc.get("wiki.failed_count").and_then(|v| v.as_i64()), Some(1));
+        assert_eq!(
+            doc.get("repo.Dock.status").and_then(|v| v.as_str()),
+            Some("failed")
+        );
+        assert_eq!(
+            doc.get("repo.Dock.error").and_then(|v| v.as_str()),
+            Some("Dock: contents request failed (HTTP 403)")
+        );
+        let reparsed = FishDocument::parse(&doc.to_string()).unwrap();
+        assert_eq!(reparsed, doc);
+    }
+
+    #[test]
+    fn retry_after_reads_rate_limit_headers() {
+        let retry = HttpResponse {
+            status: 429,
+            headers: vec![("Retry-After".to_string(), "30".to_string())],
+            body: b"rate limit".to_vec(),
+            url: String::new(),
+        };
+        assert_eq!(retry_after_secs(&retry), Some(35));
+        let reset = Date::now().timestamp() + 120;
+        let limited = HttpResponse {
+            status: 403,
+            headers: vec![("X-RateLimit-Reset".to_string(), reset.to_string())],
+            body: b"API rate limit exceeded".to_vec(),
+            url: String::new(),
+        };
+        let wait = retry_after_secs(&limited).unwrap();
+        assert!((120..=135).contains(&wait), "wait was {wait}");
+        let plain = HttpResponse {
+            status: 403,
+            headers: Vec::new(),
+            body: b"forbidden".to_vec(),
+            url: String::new(),
+        };
+        assert_eq!(retry_after_secs(&plain), None);
     }
 
     #[test]

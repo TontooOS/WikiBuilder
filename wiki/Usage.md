@@ -13,6 +13,7 @@ How to run WikiBuilder, switch languages and read the output bundle.
 | `--lang-dir` | auto | Directory with `<lang>.json` files |
 | `--list-only` | off | Only print repositories, build no bundle |
 | `--timeout` | `30` | HTTP timeout per request in seconds |
+| `--token` | `GITHUB_TOKEN` env | GitHub token for API requests (higher rate limits) |
 
 ## Languages
 
@@ -54,7 +55,15 @@ DeveloperDocumentaion.zip
 wikibuilder --out DeveloperDocumentaion.zip
 wikibuilder --org TontooOS --branch main --lang de_de
 wikibuilder --list-only
+GITHUB_TOKEN=ghp_... wikibuilder --out DeveloperDocumentaion.zip
 ```
+
+## Error Behavior
+
+- Repos that fail mid-fetch do not abort the run; they land in the manifest
+  with status `failed` plus an `error` message.
+- Returns `Err` (non-zero exit) when the repo list cannot be fetched or when
+  zero repos were bundled.
 
 ## Cross References
 

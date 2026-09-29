@@ -14,7 +14,9 @@ list repositories, download wiki folders, write the bundle.
 ## Listing
 
 ```rust
-fn list_repos(org: &str, timeout: Duration) -> Result<Vec<(String, String)>, String>
+impl Github {
+    fn list_repos(&self, org: &str) -> Result<Vec<(String, String)>, String>
+}
 ```
 
 - Returns `(name, default_branch)` pairs for every public repository.
@@ -23,12 +25,17 @@ fn list_repos(org: &str, timeout: Duration) -> Result<Vec<(String, String)>, Str
   answers with a non-2xx status.
 - Requests carry `User-Agent: TontooOS-WikiBuilder/26.1` and
   `Accept: application/vnd.github+json`.
+- When a token is set (`--token` or `GITHUB_TOKEN`), requests carry
+  `Authorization: Bearer <token>` for the 5000-requests-per-hour quota
+  instead of the anonymous 60-requests-per-hour quota.
 
 ## Fetching
 
 ```rust
-fn fetch_repo_wiki(org: &str, repo: &str, branch: &str, timeout: Duration)
-    -> Result<Option<RepoWiki>, String>
+impl Github {
+    fn fetch_repo_wiki(&self, org: &str, repo: &str, branch: &str)
+        -> Result<Option<RepoWiki>, String>
+}
 ```
 
 - Lists `GET /repos/{org}/{repo}/contents/wiki?ref={branch}` and recurses
@@ -40,6 +47,16 @@ fn fetch_repo_wiki(org: &str, repo: &str, branch: &str, timeout: Duration)
 - Resolves the head commit SHA via `GET /repos/{org}/{repo}/branches/{branch}`;
   unreachable SHAs become `"unknown"`.
 - Returns `Err` when a listing or file download fails with a non-2xx status.
+- A per-repo `Err` never aborts the run: the repo is recorded in the
+  manifest with status `failed` plus its error message, and the run
+  continues. The run only fails when zero repos were bundled.
+
+### Retries
+
+- `Github::get` retries rate-limit answers (HTTP 403/429 with a rate-limit
+  body, up to 4 waits honoring `Retry-After` or `X-RateLimit-Reset`) and
+  server errors (HTTP 5xx, up to 3 tries with backoff).
+- Returns `Err` when the retries are exhausted or the failure is permanent.
 
 ### Selection rule
 

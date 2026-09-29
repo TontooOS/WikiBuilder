@@ -8,9 +8,11 @@
     "status.fetch_wiki": "Lade Wiki von {repo} ({branch})...",
     "status.repo_ok": "ok ({files} Dateien).",
     "status.repo_skip": "uebersprungen (kein wiki/MAIN.md).",
+    "status.repo_failed": "fehlgeschlagen ({error}).",
     "status.write_manifest": "Schreibe manifest.fico...",
     "status.write_zip": "Packe Bundle (Stored, 0 Kompression)...",
     "status.done": "Fertig: {repos} Repos, {files} Dateien -> {out} ({bytes} Bytes).",
-    "error.prefix": "Fehler"
+    "error.prefix": "Fehler",
+    "error.empty": "keine Wiki-Daten gebuendelt, nichts zu releasen"
   }
 }

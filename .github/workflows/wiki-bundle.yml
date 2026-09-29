@@ -58,7 +58,10 @@ jobs:
         run: cargo build --release
 
       - name: Build wiki bundle
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -o pipefail
           ORG="${{ inputs.org }}"
           if [ -z "$ORG" ]; then ORG="TontooOS"; fi
           ./target/release/wikibuilder --org "$ORG" --out DeveloperDocumentaion.zip | tee build.log
