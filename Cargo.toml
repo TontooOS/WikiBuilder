@@ -12,7 +12,11 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-# TontooOS SDK: ArchiveKit (Stored ZIP), FishFile (manifest.fico),
+# TontooOS frameworks via direct paths (no SDK shim):
+# ArchiveKit (Stored ZIP), FishFile (manifest.fico),
 # Foundation (JSON, dates, lang files), NetworkKit (GitHub API HTTP).
-# On-device: /Library/System/sdk.
-sdk = { path = "/Library/System/sdk", features = ["ArchiveKit", "FishFile", "Foundation", "NetworkKit"] }
+# On-device and CI: /Library/System/*.
+archivekit = { path = "/Library/System/ArchiveKit" }
+fishfile = { path = "/Library/System/FishFile" }
+foundation = { path = "/Library/System/Foundation" }
+networkkit = { path = "/Library/System/NetworkKit" }

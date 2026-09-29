@@ -45,14 +45,12 @@ jobs:
           VERSION_OVERRIDE: ${{ inputs.version }}
         run: python3 .github/workflows/next_version.py
 
-      - name: Provide TontooOS SDK
+      - name: Provide TontooOS frameworks
         run: |
-          mkdir -p tontoolibs
-          for lib in Accessibility ArchiveKit AudioKit CoreData CoreIcon CoreImage CoreLocation CoreSettings CoreText CoreWindows DocumentKit FishFile Foundation LaunchPad MapsKit MediaKit NetworkKit PDFKit SDK SQLKit TontooUI WeatherKit WebKit; do
-            git clone --depth 1 "https://github.com/TontooOS/${lib}.git" "tontoolibs/${lib}"
-          done
           sudo mkdir -p /Library/System
-          sudo ln -sfn "$PWD/tontoolibs/SDK" /Library/System/sdk
+          for lib in ArchiveKit FishFile Foundation NetworkKit; do
+            sudo git clone --depth 1 "https://github.com/TontooOS/${lib}.git" "/Library/System/${lib}"
+          done
 
       - name: Build wikibuilder
         env:

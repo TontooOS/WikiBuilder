@@ -36,5 +36,6 @@ See [Builder.md](Builder.md) for details.
 
 ## Changelog
 
+- 2026-09-29: Direct `/Library/System/*` dependencies instead of the SDK shim (fixes CI build)
 - 2026-09-29: Added release automation (3-day schedule, manual trigger, versioned releases from 0.01)
 - 2026-09-29: Initial wiki for WikiBuilder 26.1.0

@@ -20,7 +20,12 @@ manual runs with an organisation or version override.
 | Step | Description |
 |---|---|
 | `Resolve release version` | Runs `.github/workflows/next_version.py` |
-| `Provide TontooOS SDK` | Clones the framework repos and links `/Library/System/sdk` |
+| `Provide TontooOS frameworks` | Clones `ArchiveKit`, `FishFile`, `Foundation`, `NetworkKit` into `/Library/System/` |
+
+> **Note:** These four repositories are the full transitive path-dependency
+> closure (`ArchiveKit` needs `FishFile`, `FishFile` and `NetworkKit` need
+> `Foundation`, `Foundation` needs no other TontooOS repo). When a framework
+> gains a new TontooOS path dependency, add it to the clone loop.
 | `Build wikibuilder` | `cargo build --release` with `WIKIBUILDER_VERSION` set |
 | `Build wiki bundle` | Runs the binary, extracts `manifest.fico` for the release |
 | `Create release` | `gh release create` with the ZIP, the manifest and notes |
@@ -61,6 +66,10 @@ gh workflow run "Wiki Bundle Release" --repo TontooOS/WikiBuilder
 gh workflow run "Wiki Bundle Release" --repo TontooOS/WikiBuilder \
   -f org=TontooOS -f version=0.07
 ```
+
+## Changelog
+
+- 2026-09-29: Direct `/Library/System/*` dependencies instead of the SDK shim (CI clones the four frameworks)
 
 ## Cross References
 

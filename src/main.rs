@@ -23,13 +23,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-sdk::preinclude!();
-
-use crate::ArchiveKit::{CompressionLevel, ZipWriter, ZipWriterOptions};
-use crate::FishFile::{FishDocument, FishValue};
-use crate::Foundation::date::{Date, ISO8601DateFormatter};
-use crate::Foundation::serialization::{JSONSerialization, JsonValue};
-use crate::NetworkKit::http::HttpRequest;
+use archivekit::{CompressionLevel, ZipWriter, ZipWriterOptions};
+use fishfile::{FishDocument, FishValue};
+use foundation::date::{Date, ISO8601DateFormatter};
+use foundation::serialization::{JSONSerialization, JsonValue};
+use networkkit::http::HttpRequest;
 
 /// Current builder version, also recorded in `manifest.fico`.
 /// Release builds override it with the `WIKIBUILDER_VERSION` env var
@@ -547,14 +545,14 @@ mod tests {
         }];
         let manifest = build_manifest("TontooOS", &repos, &[]);
         let bytes = pack_bundle(&manifest, &repos).unwrap();
-        let entries = crate::ArchiveKit::zip_unpack(&bytes).unwrap();
+        let entries = archivekit::zip_unpack(&bytes).unwrap();
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
         assert!(names.contains(&"manifest.fico"));
         assert!(names.contains(&"ArchiveKit/MAIN.md"));
         // 0 compression: every file entry is Stored.
         for entry in &entries {
             if !entry.is_dir() {
-                assert_eq!(entry.method, crate::ArchiveKit::ZipMethod::Stored);
+                assert_eq!(entry.method, archivekit::ZipMethod::Stored);
             }
         }
         let manifest_entry = entries.iter().find(|e| e.name == "manifest.fico").unwrap();
