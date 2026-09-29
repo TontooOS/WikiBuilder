@@ -1,0 +1,18 @@
+[package]
+name = "wikibuilder"
+version = "26.1.0"
+edition = "2021"
+license = "TCL"
+description = "TontooOS offline wiki bundle builder"
+authors = ["arlomu"]
+
+[[bin]]
+name = "wikibuilder"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+# TontooOS SDK: ArchiveKit (Stored ZIP), FishFile (manifest.fico),
+# Foundation (JSON, dates, lang files), NetworkKit (GitHub API HTTP).
+# On-device: /Library/System/sdk.
+sdk = { path = "/Library/System/sdk", features = ["ArchiveKit", "FishFile", "Foundation", "NetworkKit"] }

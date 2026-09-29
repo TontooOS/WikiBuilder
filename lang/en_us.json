@@ -1,0 +1,16 @@
+{
+  "lang": "en_us",
+  "translations": {
+    "app.title": "WikiBuilder",
+    "app.description": "Build the offline TontooOS wiki bundle",
+    "status.fetch_repos": "Listing repositories of {org}...",
+    "status.found_repos": "Found {count} repositories.",
+    "status.fetch_wiki": "Fetching wiki of {repo} ({branch})...",
+    "status.repo_ok": "ok ({files} files).",
+    "status.repo_skip": "skipped (no wiki/MAIN.md).",
+    "status.write_manifest": "Writing manifest.fico...",
+    "status.write_zip": "Packing bundle (Stored, 0 compression)...",
+    "status.done": "Done: {repos} repos, {files} files -> {out} ({bytes} bytes).",
+    "error.prefix": "error"
+  }
+}
